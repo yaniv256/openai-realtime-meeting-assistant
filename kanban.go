@@ -198,6 +198,18 @@ func (app *kanbanBoardApp) JoinConferenceRoom() error {
 		log.Infof("OpenAI Realtime peer state changed: %s", state.String())
 		broadcastKanbanEvent("status", "OpenAI Realtime: "+state.String())
 	})
+	// IP3: log ICE candidates — confirms whether PION_NAT1TO1_IP is producing a public candidate
+	peerConnection.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c == nil {
+			log.Infof("OpenAI Realtime ICE gathering complete")
+			return
+		}
+		log.Infof("OpenAI Realtime ICE candidate: %s", c.String())
+	})
+	// IP4: log ICE connection state — shows checking→connected or checking→failed sequence
+	peerConnection.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		log.Infof("OpenAI Realtime ICE connection state: %s", state.String())
+	})
 	events.OnOpen(func() {
 		log.Infof("OpenAI Realtime event channel opened")
 		_ = app.SendEvent(app.sessionUpdateEvent())
@@ -267,6 +279,17 @@ func (app *kanbanBoardApp) connectRealtimePeer(apiKey string, model string) erro
 	localDescription := peerConnection.LocalDescription()
 	if localDescription == nil || strings.TrimSpace(localDescription.SDP) == "" {
 		return fmt.Errorf("Realtime peer connection did not produce a local description")
+	}
+
+	// IP_SDP: log whether the public or private IP appears in the SDP offer
+	// This confirms whether SetNAT1To1IPs rewrote the candidate before GatheringCompletePromise fired.
+	nat1To1IP := os.Getenv("PION_NAT1TO1_IP")
+	if nat1To1IP != "" {
+		if strings.Contains(localDescription.SDP, nat1To1IP) {
+			log.Infof("[SDP-CHECK] Public IP %s IS in SDP offer — NAT rewrite applied correctly", nat1To1IP)
+		} else {
+			log.Errorf("[SDP-CHECK] Public IP %s NOT in SDP offer — NAT rewrite missed, private IP will be sent to OpenAI", nat1To1IP)
+		}
 	}
 
 	answerSDP, err := app.createRealtimeCall(apiKey, model, localDescription.SDP)
@@ -356,9 +379,16 @@ func (app *kanbanBoardApp) createRealtimeCall(apiKey string, model string, offer
 	if err != nil {
 		return "", fmt.Errorf("read Realtime answer: %w", err)
 	}
+	// IP2: log API response status so we know whether the call succeeded or failed
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		body := strings.TrimSpace(string(answerSDP))
+		if len(body) > 300 {
+			body = body[:300]
+		}
+		log.Errorf("OpenAI /v1/realtime/calls FAILED: status=%s body=%s", response.Status, body)
 		return "", fmt.Errorf("Realtime session failed: status=%s body=%s", response.Status, strings.TrimSpace(string(answerSDP)))
 	}
+	log.Infof("OpenAI /v1/realtime/calls OK: status=%s sdp_len=%d", response.Status, len(answerSDP))
 
 	return string(answerSDP), nil
 }
@@ -1022,4 +1052,33 @@ func broadcastKanbanEvent(event string, data any) {
 			log.Errorf("Failed to send Kanban event: %v", err)
 		}
 	}
+}
+
+// IsConnected reports whether the OpenAI Realtime session is active.
+func (app *kanbanBoardApp) IsConnected() bool {
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	return app.connected
+}
+
+// Disconnect closes the OpenAI Realtime peer connection and resets session state
+// so JoinConferenceRoom can be called again.
+func (app *kanbanBoardApp) Disconnect() error {
+	app.mu.Lock()
+	pc := app.pc
+	app.pc = nil
+	app.events = nil
+	app.inputTrack = nil
+	app.inputEnc = nil
+	app.connected = false
+	app.closeOnce = sync.Once{} // reset so Close() works on a future instance
+	app.mu.Unlock()
+
+	if roomMixer != nil {
+		roomMixer.removeSink(realtimeMixedAudioSinkKey)
+	}
+	if pc != nil {
+		return pc.Close()
+	}
+	return nil
 }
