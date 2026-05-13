@@ -198,6 +198,18 @@ func (app *kanbanBoardApp) JoinConferenceRoom() error {
 		log.Infof("OpenAI Realtime peer state changed: %s", state.String())
 		broadcastKanbanEvent("status", "OpenAI Realtime: "+state.String())
 	})
+	// IP3: log ICE candidates — confirms whether PION_NAT1TO1_IP is producing a public candidate
+	peerConnection.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c == nil {
+			log.Infof("OpenAI Realtime ICE gathering complete")
+			return
+		}
+		log.Infof("OpenAI Realtime ICE candidate: %s", c.String())
+	})
+	// IP4: log ICE connection state — shows checking→connected or checking→failed sequence
+	peerConnection.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		log.Infof("OpenAI Realtime ICE connection state: %s", state.String())
+	})
 	events.OnOpen(func() {
 		log.Infof("OpenAI Realtime event channel opened")
 		_ = app.SendEvent(app.sessionUpdateEvent())
@@ -356,9 +368,16 @@ func (app *kanbanBoardApp) createRealtimeCall(apiKey string, model string, offer
 	if err != nil {
 		return "", fmt.Errorf("read Realtime answer: %w", err)
 	}
+	// IP2: log API response status so we know whether the call succeeded or failed
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		body := strings.TrimSpace(string(answerSDP))
+		if len(body) > 300 {
+			body = body[:300]
+		}
+		log.Errorf("OpenAI /v1/realtime/calls FAILED: status=%s body=%s", response.Status, body)
 		return "", fmt.Errorf("Realtime session failed: status=%s body=%s", response.Status, strings.TrimSpace(string(answerSDP)))
 	}
+	log.Infof("OpenAI /v1/realtime/calls OK: status=%s sdp_len=%d", response.Status, len(answerSDP))
 
 	return string(answerSDP), nil
 }
