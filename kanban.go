@@ -281,6 +281,17 @@ func (app *kanbanBoardApp) connectRealtimePeer(apiKey string, model string) erro
 		return fmt.Errorf("Realtime peer connection did not produce a local description")
 	}
 
+	// IP_SDP: log whether the public or private IP appears in the SDP offer
+	// This confirms whether SetNAT1To1IPs rewrote the candidate before GatheringCompletePromise fired.
+	nat1To1IP := os.Getenv("PION_NAT1TO1_IP")
+	if nat1To1IP != "" {
+		if strings.Contains(localDescription.SDP, nat1To1IP) {
+			log.Infof("[SDP-CHECK] Public IP %s IS in SDP offer — NAT rewrite applied correctly", nat1To1IP)
+		} else {
+			log.Errorf("[SDP-CHECK] Public IP %s NOT in SDP offer — NAT rewrite missed, private IP will be sent to OpenAI", nat1To1IP)
+		}
+	}
+
 	answerSDP, err := app.createRealtimeCall(apiKey, model, localDescription.SDP)
 	if err != nil {
 		return err
