@@ -44,7 +44,20 @@
         padding: 6px 12px;
       }
 
-      .presenting-pill {
+      .topbar-top {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .topbar-bottom {
+        display: flex;
+        justify-content: flex-end;
+        width: 100%;
+        margin-top: 6px;
+      }
+
+            .presenting-pill {
         display: inline-grid;
         place-items: center;
         width: 24px;
@@ -502,6 +515,62 @@
         padding: 0 2px;
       }
 
+      .ai-session-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        border: 0;
+        border-radius: 999px;
+        background: #3c4043;
+        color: inherit;
+        cursor: pointer;
+        font: inherit;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        padding: 5px 11px 5px 8px;
+        transition: background 120ms, opacity 120ms;
+        white-space: nowrap;
+      }
+
+      .ai-session-btn:hover {
+        background: #4a4e51;
+      }
+
+      .ai-session-btn:active {
+        opacity: 0.8;
+      }
+
+      .ai-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+
+      .ai-dot.connected {
+        background: #34a853;
+        box-shadow: 0 0 0 0 rgba(52, 168, 83, 0.6);
+        animation: ai-pulse-green 2s ease-out infinite;
+      }
+
+      .ai-dot.ready {
+        background: #34a853;
+      }
+
+      .ai-dot.disconnected {
+        background: #f9ab00;
+        box-shadow: 0 0 0 0 rgba(249, 171, 0, 0.6);
+      }
+
+      @keyframes ai-pulse-green {
+        0%   { box-shadow: 0 0 0 0 rgba(52, 168, 83, 0.55); }
+        60%  { box-shadow: 0 0 0 5px rgba(52, 168, 83, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(52, 168, 83, 0); }
+      }
+
+
+
       .meeting-bar {
         display: grid;
         grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
@@ -660,10 +729,18 @@
   <body>
     <main>
       <header class="topbar">
-        <span class="presenting-pill" aria-hidden="true">K</span>
-        <div>
-          <h1>Realtime Kanban Meeting Assistant</h1>
-          <p class="status" id="status">Not connected</p>
+        <div class="topbar-top">
+          <span class="presenting-pill" aria-hidden="true">K</span>
+          <div>
+            <h1>Realtime Kanban Meeting Assistant</h1>
+            <p class="status" id="status">Not connected</p>
+          </div>
+        </div>
+        <div class="topbar-bottom">
+          <button class="ai-session-btn" id="aiSessionBtn" type="button" aria-label="AI session status">
+            <span class="ai-dot disconnected" id="aiDot"></span>
+            <span id="aiSessionLabel">AI off</span>
+          </button>
         </div>
       </header>
 
@@ -744,7 +821,7 @@
           localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
           localVideo.srcObject = localStream
 
-          pc = new RTCPeerConnection()
+          pc = new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'},{urls:'stun:stun1.l.google.com:19302'}]})
           pc.ontrack = addRemoteTrack
           pc.onicecandidate = event => {
             if (!event.candidate || ws?.readyState !== WebSocket.OPEN) {
@@ -765,6 +842,8 @@
           ws = new WebSocket(`${scheme}://${window.location.host}/websocket`)
           ws.onopen = () => {
             leaveButton.disabled = false
+            inRoom = true
+            pollAiStatus()
             setStatus('Connected')
           }
           ws.onmessage = event => handleSignal(JSON.parse(event.data))
@@ -808,8 +887,21 @@
               changes.commentPreviews.forEach(showCommentPreview)
             }
             break
-          case 'status':
-            setLog(String(message.data || ''))
+          case 'status': {
+            const statusMsg = String(message.data || '')
+            setLog(statusMsg)
+            // Sync AI button state from server-broadcast status events
+            if (statusMsg.includes('listening')) {
+              setAiState(true)
+            } else if (statusMsg.includes('disabled') || statusMsg.includes('closed') || statusMsg.includes('failed')) {
+              setAiState(false)
+            }
+            break
+          }
+          case 'ai_status':
+            // Server pushes this when AI session connects or disconnects.
+            // All browsers in the room receive this simultaneously.
+            setAiState(!!message.data?.connected)
             break
         }
       }
@@ -1338,6 +1430,8 @@
 
         remoteElements.forEach(tile => tile.remove())
         remoteElements.clear()
+        inRoom = false
+        pollAiStatus()
         setStatus('Not connected')
       }
 
@@ -1348,6 +1442,80 @@
       function setLog(message) {
         logEl.textContent = message
       }
+
+      // ── AI session status button ────────────────────────────────────────
+      const aiSessionBtn = document.getElementById('aiSessionBtn')
+      const aiDot = document.getElementById('aiDot')
+      const aiSessionLabel = document.getElementById('aiSessionLabel')
+
+      let inRoom = false
+      let aiServerConnected = false  // tracks actual server state, not CSS class
+
+      function setAiState(connected) {
+        aiServerConnected = connected
+        if (connected && inRoom) {
+          aiDot.className = 'ai-dot connected'
+          aiSessionLabel.textContent = 'AI listening'
+          aiSessionBtn.title = 'Click to disconnect AI session'
+        } else if (connected && !inRoom) {
+          aiDot.className = 'ai-dot ready'
+          aiSessionLabel.textContent = 'AI ready'
+          aiSessionBtn.title = 'AI session is ready — join the room to start listening'
+        } else {
+          aiDot.className = 'ai-dot disconnected'
+          aiSessionLabel.textContent = 'AI off'
+          aiSessionBtn.title = 'Click to reconnect AI session'
+        }
+      }
+
+      async function pollAiStatus() {
+        try {
+          const resp = await fetch('/api/ai-status')
+          if (resp.ok) {
+            const data = await resp.json()
+            setAiState(data.connected)
+          }
+        } catch (_) { /* server may be restarting */ }
+      }
+
+      aiSessionBtn.addEventListener('click', async () => {
+aiSessionBtn.disabled = true
+        try {
+          const endpoint = aiServerConnected ? '/api/ai-disconnect' : '/api/ai-connect'
+          const resp = await fetch(endpoint, { method: 'POST' })
+          if (!resp.ok) {
+            const text = await resp.text()
+            setLog('AI session error: ' + text)
+          }
+          if (aiServerConnected) {
+            // Disconnect: poll immediately
+            await pollAiStatus()
+          } else {
+            // Connect: show connecting state, then rapid-poll until session is up
+            aiSessionLabel.textContent = 'Connecting…'
+            aiDot.className = 'ai-dot ready'
+            const deadline = Date.now() + 8000  // give up after 8s
+            while (Date.now() < deadline) {
+              await new Promise(r => setTimeout(r, 500))
+              const r2 = await fetch('/api/ai-status').then(r => r.json()).catch(() => null)
+              if (r2?.connected) {
+                setAiState(true)
+                break
+              }
+            }
+            // If we timed out, poll once more to get accurate state
+            if (!aiServerConnected) await pollAiStatus()
+          }
+        } catch (e) {
+          setLog('AI session error: ' + e.message)
+        } finally {
+          aiSessionBtn.disabled = false
+        }
+      })
+
+      // Poll on load and every 15 seconds
+      pollAiStatus()
+      setInterval(pollAiStatus, 15000)
     </script>
   </body>
 </html>

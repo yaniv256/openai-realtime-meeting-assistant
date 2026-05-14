@@ -87,6 +87,11 @@ func main() {
 	// websocket handler
 	http.HandleFunc("/websocket", websocketHandler)
 
+	// AI session status API
+	http.HandleFunc("/api/ai-status", aiStatusHandler)
+	http.HandleFunc("/api/ai-connect", aiConnectHandler)
+	http.HandleFunc("/api/ai-disconnect", aiDisconnectHandler)
+
 	// index.html handler
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if err = indexTemplate.Execute(w, "ws://"+r.Host+"/websocket"); err != nil {
@@ -500,4 +505,46 @@ func (t *threadSafeWriter) WriteJSON(v any) error {
 	defer t.Unlock()
 
 	return t.Conn.WriteJSON(v)
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// GET /api/ai-status — returns {"connected": true/false}
+func aiStatusHandler(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"connected": kanbanApp.IsConnected()})
+}
+
+// POST /api/ai-connect — reconnects the OpenAI Realtime session if not already connected.
+func aiConnectHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if kanbanApp.IsConnected() {
+		writeJSON(w, map[string]any{"ok": true, "already_connected": true})
+		return
+	}
+	if err := kanbanApp.JoinConferenceRoom(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	broadcastKanbanEvent("ai_status", map[string]any{"connected": true})
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// POST /api/ai-disconnect — closes the OpenAI Realtime session.
+func aiDisconnectHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := kanbanApp.Disconnect(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	broadcastKanbanEvent("ai_status", map[string]any{"connected": false})
+	writeJSON(w, map[string]any{"ok": true})
 }
