@@ -87,9 +87,51 @@ func main() {
 	// websocket handler
 	http.HandleFunc("/websocket", websocketHandler)
 
-	// index.html handler
+	// App icon — dark circle with K, matches the topbar presenting-pill.
+	// Used as favicon, apple-touch-icon, and PWA manifest icon.
+	http.HandleFunc("/meeting/icon.svg", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "max-age=86400")
+		w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <rect width="100" height="100" rx="22" fill="#3c4043"/>
+  <text x="50" y="68" font-family="system-ui,sans-serif" font-size="56" font-weight="700" fill="#ffffff" text-anchor="middle">K</text>
+</svg>`))
+	})
+
+	// PWA manifest — enables "Add to Home Screen" as standalone app on iOS/Android
+	http.HandleFunc("/meeting/manifest.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/manifest+json")
+		w.Header().Set("Cache-Control", "max-age=3600")
+		w.Write([]byte(`{
+  "name": "Meeting Assistant",
+  "short_name": "Meeting",
+  "start_url": "/meeting",
+  "display": "standalone",
+  "background_color": "#202124",
+  "theme_color": "#202124",
+  "icons": [{"src": "/meeting/icon.svg", "sizes": "any", "type": "image/svg+xml"}]
+}`))
+	})
+
+	// AI session status API
+	http.HandleFunc("/api/ai-status", aiStatusHandler)
+	http.HandleFunc("/api/ai-connect", aiConnectHandler)
+	http.HandleFunc("/api/ai-disconnect", aiDisconnectHandler)
+	http.HandleFunc("/api/set-voice-mode", setVoiceModeHandler)
+
+	// index.html handler — passes initial AI state so button renders correctly before WebSocket join
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if err = indexTemplate.Execute(w, "ws://"+r.Host+"/websocket"); err != nil {
+		w.Header().Set("Cache-Control", "no-store")
+		data := struct {
+			WSURL       string
+			AIConnected bool
+			VoiceMode   bool
+		}{
+			WSURL:       "ws://" + r.Host + "/websocket",
+			AIConnected: kanbanApp.IsConnected(),
+			VoiceMode:   kanbanApp.IsVoiceMode(),
+		}
+		if err = indexTemplate.Execute(w, data); err != nil {
 			log.Errorf("Failed to parse index template: %v", err)
 		}
 	})
@@ -113,7 +155,11 @@ func newPeerConnection() (*webrtc.PeerConnection, error) {
 		settingEngine.SetNAT1To1IPs([]string{nat1To1IP}, webrtc.ICECandidateTypeHost)
 	}
 
-	return webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine)).NewPeerConnection(webrtc.Configuration{})
+	return webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine)).NewPeerConnection(webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{
+			{URLs: []string{"stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"}},
+		},
+	})
 }
 
 // Add to list of tracks and fire renegotation for all PeerConnections.
@@ -347,6 +393,14 @@ func websocketHandler(w http.ResponseWriter, r *http.Request) { // nolint
 	if err := sendKanbanEvent(c, "status", "Connected to conference room"); err != nil {
 		log.Errorf("Failed to send Kanban status: %v", err)
 	}
+	if err := sendKanbanEvent(c, "ai_status", map[string]any{"connected": kanbanApp.IsConnected()}); err != nil {
+		log.Errorf("Failed to send AI status: %v", err)
+	}
+	if kanbanApp.IsConnected() {
+		if err := sendKanbanEvent(c, "ai_message", "👋 Hi, I'm your meeting assistant — I'm listening and I'll act on the board on your behalf. Just ask."); err != nil {
+			log.Errorf("Failed to send welcome message: %v", err)
+		}
+	}
 
 	// Trickle ICE. Emit server candidate to client
 	peerConnection.OnICECandidate(func(i *webrtc.ICECandidate) {
@@ -500,4 +554,70 @@ func (t *threadSafeWriter) WriteJSON(v any) error {
 	defer t.Unlock()
 
 	return t.Conn.WriteJSON(v)
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// GET /api/ai-status — returns {"connected": true/false}
+func aiStatusHandler(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"connected": kanbanApp.IsConnected()})
+}
+
+// POST /api/ai-connect — reconnects the OpenAI Realtime session if not already connected.
+func aiConnectHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if kanbanApp.IsConnected() {
+		writeJSON(w, map[string]any{"ok": true, "already_connected": true})
+		return
+	}
+	// JoinConferenceRoom does blocking network I/O (OpenAI SDP exchange);
+	// run in background so the HTTP response returns immediately.
+	// The ai_status broadcast fires once the peer connects via OnConnectionStateChange.
+	go kanbanApp.JoinConferenceRoom() //nolint:errcheck
+	writeJSON(w, map[string]any{"ok": true, "connecting": true})
+}
+
+// POST /api/ai-disconnect — closes the OpenAI Realtime session.
+func aiDisconnectHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := kanbanApp.Disconnect(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	broadcastKanbanEvent("ai_status", map[string]any{"connected": false})
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// POST /api/set-voice-mode — toggle whether the AI speaks replies aloud
+func setVoiceModeHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	kanbanApp.mu.Lock()
+	kanbanApp.voiceMode = body.Enabled
+	kanbanApp.mu.Unlock()
+	// Send session.update so the change takes effect immediately
+	if err := kanbanApp.SendEvent(kanbanApp.sessionUpdateEvent()); err != nil {
+		http.Error(w, "failed to update session", http.StatusInternalServerError)
+		return
+	}
+	broadcastKanbanEvent("voice_mode", map[string]any{"enabled": body.Enabled})
+	writeJSON(w, map[string]any{"ok": true, "voice": body.Enabled})
 }

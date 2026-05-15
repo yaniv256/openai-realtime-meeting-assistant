@@ -1,116 +1,150 @@
-# Realtime Meeting Assistant Demo
+# Realtime Meeting Assistant
 
 [![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 ![Go](https://img.shields.io/badge/Built_with-Go-blue)
 ![WebRTC](https://img.shields.io/badge/Uses-WebRTC-blueviolet)
 ![OpenAI API](https://img.shields.io/badge/Powered_by-OpenAI_API-orange)
 
-This demo showcases how to use the [OpenAI Realtime API](https://platform.openai.com/docs/guides/realtime) to interact through voice with a Kanban board during a standup. Multiple users can join the same WebRTC room and update the shared board with natural voice.
+A real-time meeting assistant that listens to your room, updates a shared Kanban board by voice, and speaks back through the meeting audio. Multiple participants can join the same WebRTC room; the AI hears the mix, manages the board, and responds aloud when addressed.
 
-It is implemented as a Go application using Pion WebRTC, Gorilla WebSocket, Opus audio encoding/decoding, and the [Realtime + WebRTC integration](https://developers.openai.com/api/docs/guides/realtime-webrtc/). The server mixes participant audio, sends it to an OpenAI Realtime peer, and uses [function calling](https://developers.openai.com/api/docs/guides/realtime-conversations/) to trigger board updates.
+Live at **[realtimevoice.dev/meeting](https://realtimevoice.dev/meeting)**.
 
-![screenshot](./public/screenshot.png)
+Built on [Pion WebRTC](https://github.com/pion/webrtc) and the [OpenAI Realtime API](https://platform.openai.ai/docs/guides/realtime-webrtc). Originally based on [openai/openai-realtime-meeting-assistant](https://github.com/openai/openai-realtime-meeting-assistant); extended with voice output, live transcript, per-participant AGC, and mobile PWA support.
 
 > [!IMPORTANT]
-> This demo does not include built-in authentication or access control. While the server is running, anyone who can reach the app URL can join and access the meeting room.
+> This app has no built-in authentication. Anyone with the URL can join the room. To restrict access, put an auth proxy (nginx basic auth, OAuth, VPN) in front of it.
 
-## How to use
+---
 
-### Running the application
+## Features
 
-1. **Set up the OpenAI API:**
+- **Voice Kanban** — say "I started the ICE restart ticket" and the card moves to In Progress
+- **AI voice output** — the assistant speaks back through the room's audio mix when addressed
+- **Live transcript toast** — the AI's words stream to the screen in real time as it speaks
+- **Per-participant AGC** — automatic gain control normalizes mic levels across participants; AI can query and override gains with `get_mic_gains` / `set_mic_gain`
+- **Multi-participant WebRTC** — camera + audio for all participants, mixed to the AI
+- **Mobile PWA** — installable via "Add to Home Screen" with full-screen standalone mode
+- **Delete with undo context** — deleted cards are returned in the tool result so the AI can recreate them if asked
 
-   - If you're new to the OpenAI API, [sign up for an account](https://platform.openai.com/signup).
-   - Follow the [Quickstart](https://platform.openai.com/docs/quickstart) to retrieve your API key.
+---
 
-2. **Clone the Repository:**
+## Running locally
+
+### Prerequisites
+
+- Go 1.24+
+- Opus library available via `pkg-config`
+
+```bash
+# macOS
+brew install opus pkg-config
+
+# Ubuntu/Debian
+sudo apt-get install libopus-dev pkg-config
+```
+
+### Steps
+
+1. **Clone the repository:**
 
    ```bash
-   git clone https://github.com/openai/openai-realtime-meeting-assistant.git
+   git clone https://github.com/yaniv256/openai-realtime-meeting-assistant.git
+   cd openai-realtime-meeting-assistant
    ```
 
-3. **Set your API key:**
-
-   Export `OPENAI_API_KEY` in the shell where you start the server:
+2. **Set your OpenAI API key:**
 
    ```bash
-   export OPENAI_API_KEY=<your_api_key>
+   export OPENAI_API_KEY=your_key_here
    ```
 
-   The server reads environment variables directly. A `.env` file is not loaded automatically.
-
-4. **Install dependencies:**
-
-   You need Go 1.24 or newer and the Opus library available through `pkg-config`.
-
-   ```bash
-   brew install opus pkg-config
-   ```
-
-5. **Run the app:**
+3. **Run:**
 
    ```bash
    go run .
    ```
 
-   The app will be available at [http://localhost:3000](http://localhost:3000).
+   Open [http://localhost:3000/meeting](http://localhost:3000/meeting). Use `-addr :8080` for a different port.
 
-   To use another port:
+4. **Join the room** — click **Join room**, allow camera and microphone access. Open the same URL in another tab or device to join as a second participant.
 
-   ```bash
-   go run . -addr :8080
-   ```
+> **Use headphones** to avoid echo. Background audio is picked up by the room mix and may trigger board updates.
 
-### Start a session
+---
 
-When the server starts, it creates the OpenAI Realtime peer if `OPENAI_API_KEY` is configured. If the key is missing or the Realtime connection fails, the browser room still loads, but the Kanban assistant will not listen or update cards.
+## Voice interaction
 
-1. Open [http://localhost:3000](http://localhost:3000).
-2. Click **Join room**.
-3. Allow camera and microphone access.
-4. Speak naturally about the work on the board. The mixed room audio is sent to the Realtime assistant, and board changes are broadcast to everyone in the room.
-5. Open the same URL in another browser tab or on another device to join as another participant.
-6. Click **Leave** to disconnect that browser from the room and stop its local media tracks.
+The assistant is quiet by default and only responds when directly addressed. Speak naturally — it picks up standup updates without explicit commands.
 
-## Demo flow
+**Board operations:**
 
-**Use headphones or keep speaker volume low to avoid echo. Background audio can be picked up by the meeting mix and interpreted as board updates.**
+| What you say | What happens |
+|---|---|
+| "I started the ICE restart ticket" | Moves matching card to In Progress |
+| "The DTLS work is blocked on transport shutdown" | Moves to Blocked, adds notes |
+| "We shipped the RTP packetizer" | Moves to Done |
+| "Create a ticket for simulcast subscription controls" | Creates a new card |
+| "Add the bandwidth tag to the simulcast card" | Adds tag without replacing others |
+| "Delete the packet retransmission buffer ticket" | Deletes card; full content returned to AI context for undo |
 
-The demo starts with a few WebRTC-related Kanban cards in the Backlog column. Try saying:
+**Addressing the AI:**
 
-1. "I started the ICE restart handling ticket."
-2. "The DTLS cleanup work is blocked on a transport shutdown issue."
-3. "We shipped the RTP HEVC packetizer."
-4. "Create a ticket to add subscription controls for simulcast forwarding."
-5. "Add the bandwidth tag to the simulcast card."
-6. "Delete the packet retransmission buffer ticket."
+Say "assistant" or ask it a direct question. It responds in voice (if the speaker button is on) and via the live transcript toast.
 
-The board should update in place. Card moves animate, completed work triggers confetti, and note updates can show a short comment preview.
+**Voice/mute toggle:** The robot icon in the top bar controls whether the AI speaks aloud. When muted, it still processes board updates and shows transcript text.
 
-### Configured interactions
+**Mic gain:** If someone sounds too quiet, the AI can detect this and call `set_mic_gain` to boost their track. You can also ask it: "Can you boost John's mic?"
 
-The assistant is configured as a voice-operated Kanban board operator. It can:
-
-- Create tickets from explicit requests or concrete standup updates.
-- Move existing tickets between **Backlog**, **In Progress**, **Blocked**, and **Done**.
-- Add tags without replacing existing tags.
-- Update ticket titles or notes when follow-up context arrives.
-- Delete tickets by request.
-- Ignore filler, handoffs, or wrap-up phrases when no board operation is needed.
-
-For more details about the instructions and tools used by the model, see `kanban.go`.
+---
 
 ## Customization
 
-You can update:
+All AI behaviour is in `kanban.go`:
 
-- The initial cards in `initialKanbanBoardCards` in `kanban.go`.
-- The Realtime instructions in `sessionInstructions` in `kanban.go`.
-- The tools exposed to the model in `kanbanTools` in `kanban.go`.
-- The default Realtime model by setting `OPENAI_REALTIME_MODEL`; otherwise the app uses `gpt-realtime-2`.
-- The browser UI in `index.html`.
-- The HTTP bind address with the `-addr` flag in `main.go`.
+| What to change | Where |
+|---|---|
+| Initial board cards | `initialKanbanBoardCards` |
+| AI instructions | `sessionInstructions()` |
+| Tools exposed to the model | `kanbanTools()` |
+| Realtime model | `OPENAI_REALTIME_MODEL` env var (default: `gpt-realtime-2`) |
+| AGC constants | `agcTargetRMS`, `agcSpeechFloor`, `agcMaxGain` in `audio_mixer.go` |
+| Browser UI | `index.html` |
+| HTTP bind address | `-addr` flag |
+
+---
+
+## Architecture
+
+```
+Browser (WebRTC)          Go server                  OpenAI Realtime API
+─────────────────         ─────────────────────      ─────────────────────
+Camera + mic    ──────►   Room mixer (Pion)   ──────► gpt-realtime-2
+                          Per-source AGC              │
+                          ◄──────────────────────────  AI voice track
+AI voice        ◄──────   addTrack → all peers        │
+Transcript      ◄──────   WS broadcast ◄──────────────  output_audio_transcript.delta
+Board updates   ◄──────   WS broadcast ◄──────────────  function_call (tool result)
+```
+
+The server mixes all participant audio with automatic gain control and sends the mix to the OpenAI Realtime peer via WebRTC. The AI's audio output arrives as a separate WebRTC track, which the server fans out to all browser peers directly (raw RTP, no re-encoding). Tool calls update the Kanban state and broadcast it to all connected browsers via WebSocket.
+
+---
+
+## Deployment
+
+The repo includes a GitHub Actions workflow (`.github/workflows/deploy.yml`) that SSHes into an EC2 instance and runs a deploy script on every push to `main`. See the workflow file for the expected secrets (`EC2_HOST`, `EC2_SSH_KEY`).
+
+Example deploy script:
+
+```bash
+cd /path/to/openai-realtime-meeting-assistant
+git pull --ff-only origin main
+go build -o meeting-assistant .
+# restart with your process manager
+```
+
+---
 
 ## License
 
-This project is licensed under the MIT License. See the LICENSE file for details.
+MIT — see [LICENSE](LICENSE).

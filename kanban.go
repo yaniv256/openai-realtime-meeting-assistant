@@ -58,6 +58,7 @@ type kanbanBoardState struct {
 type kanbanRealtimeEvent struct {
 	Type       string `json:"type,omitempty"`
 	Transcript string `json:"transcript,omitempty"`
+	Delta      string `json:"delta,omitempty"`
 	Name       string `json:"name,omitempty"`
 	Arguments  string `json:"arguments,omitempty"`
 	CallID     string `json:"call_id,omitempty"`
@@ -86,6 +87,7 @@ type kanbanBoardApp struct {
 	handledCalls     map[string]struct{}
 
 	model      string
+	voiceMode  bool // true = output_modalities includes audio
 	pc         *webrtc.PeerConnection
 	events     *webrtc.DataChannel
 	inputTrack *webrtc.TrackLocalStaticSample
@@ -138,6 +140,7 @@ func newKanbanBoardApp() *kanbanBoardApp {
 		nextCreatedIndex: 1,
 		updatedAt:        time.Now().UTC(),
 		handledCalls:     map[string]struct{}{},
+		voiceMode:        true, // default on; user mutes rather than unmutes
 	}
 }
 
@@ -194,14 +197,47 @@ func (app *kanbanBoardApp) JoinConferenceRoom() error {
 	app.inputEnc = inputEnc
 	app.mu.Unlock()
 
+	peerConnection.OnTrack(func(t *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+		log.Infof("OpenAI Realtime audio track: Kind=%s, MimeType=%s", t.Kind(), t.Codec().MimeType)
+		if t.Kind() != webrtc.RTPCodecTypeAudio {
+			return
+		}
+		// Fan out AI audio directly to all browser peers as a static RTP track.
+		// Do NOT route through the room mixer — the mixer feeds OpenAI's input,
+		// so putting AI output there creates a feedback loop and never reaches browsers.
+		trackLocal := addTrack(t)
+		defer removeTrack(trackLocal)
+		for {
+			packet, _, err := t.ReadRTP()
+			if err != nil {
+				return
+			}
+			if err = trackLocal.WriteRTP(packet); err != nil {
+				return
+			}
+		}
+	})
+
 	peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		log.Infof("OpenAI Realtime peer state changed: %s", state.String())
 		broadcastKanbanEvent("status", "OpenAI Realtime: "+state.String())
+		switch state {
+		case webrtc.PeerConnectionStateConnected:
+			// ICE fully established — AI is actually reachable now
+			app.mu.Lock()
+			app.connected = true
+			app.mu.Unlock()
+			broadcastKanbanEvent("ai_status", map[string]any{"connected": true})
+		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed, webrtc.PeerConnectionStateDisconnected:
+			app.mu.Lock()
+			app.connected = false
+			app.mu.Unlock()
+			broadcastKanbanEvent("ai_status", map[string]any{"connected": false})
+		}
 	})
 	events.OnOpen(func() {
 		log.Infof("OpenAI Realtime event channel opened")
 		_ = app.SendEvent(app.sessionUpdateEvent())
-		broadcastKanbanEvent("status", "Kanban assistant is listening")
 	})
 	events.OnMessage(func(message webrtc.DataChannelMessage) {
 		app.handleRealtimeEvent(message.Data)
@@ -281,10 +317,6 @@ func (app *kanbanBoardApp) connectRealtimePeer(apiKey string, model string) erro
 		return fmt.Errorf("set Realtime remote description: %w", err)
 	}
 
-	app.mu.Lock()
-	app.connected = true
-	app.mu.Unlock()
-
 	return nil
 }
 
@@ -357,6 +389,11 @@ func (app *kanbanBoardApp) createRealtimeCall(apiKey string, model string, offer
 		return "", fmt.Errorf("read Realtime answer: %w", err)
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		body := strings.TrimSpace(string(answerSDP))
+		if len(body) > 300 {
+			body = body[:300]
+		}
+		log.Errorf("OpenAI /v1/realtime/calls failed: status=%s body=%s", response.Status, body)
 		return "", fmt.Errorf("Realtime session failed: status=%s body=%s", response.Status, strings.TrimSpace(string(answerSDP)))
 	}
 
@@ -401,10 +438,18 @@ func (app *kanbanBoardApp) SendEvent(payload any) error {
 }
 
 func (app *kanbanBoardApp) sessionConfig(model string) map[string]any {
+	app.mu.Lock()
+	voiceMode := app.voiceMode
+	app.mu.Unlock()
+
+	outputModalities := []string{"text"}
+	if voiceMode {
+		outputModalities = []string{"audio"}
+	}
 	session := map[string]any{
 		"type":              "realtime",
 		"model":             model,
-		"output_modalities": []string{"text"},
+		"output_modalities": outputModalities,
 		"audio": map[string]any{
 			"input": map[string]any{
 				"noise_reduction": map[string]any{
@@ -424,9 +469,9 @@ func (app *kanbanBoardApp) sessionConfig(model string) map[string]any {
 				},
 			},
 		},
-		"instructions": app.sessionInstructions(),
+		"instructions": app.sessionInstructions(voiceMode),
 		"tools":        app.kanbanTools(),
-		"tool_choice":  "required",
+		"tool_choice":  "auto",
 	}
 
 	if usesAdvancedCommandProfile(model) {
@@ -458,9 +503,16 @@ func usesAdvancedCommandProfile(model string) bool {
 	return normalizedModel == "gpt-realtime-2"
 }
 
-func (app *kanbanBoardApp) sessionInstructions() string {
+func (app *kanbanBoardApp) sessionInstructions(voiceMode bool) string {
 	return strings.Join([]string{
-		"You are a voice-operated Kanban board operator.",
+		"You are the meeting assistant for a real-time video meeting app with a shared Kanban board.",
+		"About this app: participants join at realtimevoice.dev/meeting — anyone with the URL can join, no sign-up required. Audio from all participants is mixed so everyone hears each other. Everyone sees each other's cameras. The Kanban board is shared and updates live for all participants. This is a real meeting tool, not a demo.",
+		"About privacy and hosting: the app and its source code are open-source at github.com/yaniv256/openai-realtime-meeting-assistant. Anyone can self-host their own private instance by following the instructions in the README. The Kanban board is built into the app — it cannot currently connect to external Kanban tools like Jira or Linear. A future version that lets users sign up, connect to their own Kanban, and have a private room is in development.",
+		"About reading the codebase: you have a fetch_url tool. Use it to read files from the repo when asked how the app works. Key URLs: README at https://raw.githubusercontent.com/yaniv256/openai-realtime-meeting-assistant/main/README.md — main Go server at https://raw.githubusercontent.com/yaniv256/openai-realtime-meeting-assistant/main/main.go — Kanban/AI logic at https://raw.githubusercontent.com/yaniv256/openai-realtime-meeting-assistant/main/kanban.go — frontend at https://raw.githubusercontent.com/yaniv256/openai-realtime-meeting-assistant/main/index.html",
+		"About voice replies: you have a speaker button in the topbar. By default it is off and you see text toasts. If you click it to turn it on, I will also speak my replies aloud through the meeting audio.",
+		"About security: the app has no built-in authentication — anyone with the URL can join. To host it securely, add authentication in front of it (e.g. nginx basic auth, VPN, or an OAuth proxy). The app itself does not manage user accounts.",
+		"About authorship: the original app was written by Sean DuBois, an engineer at OpenAI and creator of the Pion Go WebRTC library that powers OpenAI's Realtime API. This version running at realtimevoice.dev was adapted and extended by Yaniv Ben-Ami.",
+		"Your primary job is to operate the Kanban board by voice on behalf of the participants.",
 		"Listen to the user and decide whether they want to create a ticket, move a ticket between columns, add tags to a ticket, update a ticket, delete a ticket, or do nothing.",
 		"Use the board card ids exactly as provided when operating on existing tickets.",
 		"Users may say ticket, card, task, issue, or sticky note; treat those as Kanban cards.",
@@ -477,11 +529,19 @@ func (app *kanbanBoardApp) sessionInstructions() string {
 		"If a user asks to park, punt, defer, or move something back, move it to Backlog.",
 		"If a user asks to add a tag, call add_tags; do not replace existing tags.",
 		"If one transcript contains multiple status updates, call one tool for each board operation.",
-		"If the user asks for an operation or gives an implicit status update, call the relevant tool. Prefer tools over text replies.",
-		"If the user is only wrapping up, handing off, giving filler, or saying something like That's it from me, call do_nothing with a short reason.",
-		"If the user is not asking for a board operation and is not giving a concrete status update, call do_nothing with a short reason.",
-		"Do not narrate board operations aloud.",
+		"Audio gain: you have get_mic_gains and set_mic_gain tools. If someone seems hard to hear or their speech is being misunderstood, call get_mic_gains to see current levels, then call set_mic_gain to boost their track (e.g. gain=2.0). Proactively adjust when you notice comprehension issues.",
+		"Speaking and tool calls are independent. Your spoken words are always heard and transcribed to the room. Call a board tool (create_ticket, move_ticket, etc.) when participants report work status. Call do_nothing only when you cannot decide any other tool. For pure conversation — direct questions, greetings, app questions — just speak without calling any tool.",
+		"If the user directly addresses you (e.g. 'can you hear me', 'are you there', 'assistant', any direct question), speak your answer naturally. Do not call do_nothing just to acknowledge.",
+		"If the user asks for a board operation or gives an implicit status update, call the relevant tool.",
+		"If the user is only wrapping up, handing off, giving filler, or saying something like That's it from me, do nothing (no tool call needed).",
+		"If the user is not asking for a board operation and not giving a status update, do not call any tool — just stay quiet or speak if directly addressed.",
 		fmt.Sprintf("Current Kanban board JSON: %s", app.boardContextJSON()),
+		fmt.Sprintf("Voice mode: %s. Your spoken words are always transcribed and streamed as live text to all participants regardless of voice mode. Voice mode controls whether your audio is audible — ON means the room hears your voice, OFF means text only.", func() string {
+			if voiceMode {
+				return "ON"
+			}
+			return "OFF"
+		}()),
 	}, " ")
 }
 
@@ -520,7 +580,7 @@ func (app *kanbanBoardApp) kanbanTools() []map[string]any {
 					"status": statusProperty,
 				},
 				"required":             []string{"title", "notes", "tags"},
-				"additionalProperties": false,
+				"strict": true,
 			},
 		},
 		{
@@ -534,7 +594,7 @@ func (app *kanbanBoardApp) kanbanTools() []map[string]any {
 					"status":  statusProperty,
 				},
 				"required":             []string{"card_id", "status"},
-				"additionalProperties": false,
+				"strict": true,
 			},
 		},
 		{
@@ -548,7 +608,7 @@ func (app *kanbanBoardApp) kanbanTools() []map[string]any {
 					"tags":    tagsProperty,
 				},
 				"required":             []string{"card_id", "tags"},
-				"additionalProperties": false,
+				"strict": true,
 			},
 		},
 		{
@@ -563,7 +623,7 @@ func (app *kanbanBoardApp) kanbanTools() []map[string]any {
 					"notes":   map[string]any{"type": "string", "description": "Full replacement notes. Preserve useful existing notes while adding the new context."},
 				},
 				"required":             []string{"card_id"},
-				"additionalProperties": false,
+				"strict": true,
 			},
 		},
 		{
@@ -576,7 +636,44 @@ func (app *kanbanBoardApp) kanbanTools() []map[string]any {
 					"card_id": map[string]any{"type": "string", "description": "Existing board card id."},
 				},
 				"required":             []string{"card_id"},
-				"additionalProperties": false,
+				"strict": true,
+			},
+		},
+		{
+			"type":        "function",
+			"name":        "fetch_url",
+			"description": "Fetch the text content of a public URL. Use this to read files from the app's GitHub repo (github.com/yaniv256/openai-realtime-meeting-assistant) when asked how the app works.",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"url": map[string]any{"type": "string", "description": "Public URL to fetch (raw GitHub URLs, README, etc.)"},
+				},
+				"required":             []string{"url"},
+				"strict": true,
+			},
+		},
+		{
+			"type":        "function",
+			"name":        "get_mic_gains",
+			"description": "Returns the current gain multiplier for each active audio track in the room mixer. Use this when someone seems hard to hear or is not being understood — check their gain and boost it if needed. Track keys identify participants.",
+			"parameters": map[string]any{
+				"type":                 "object",
+				"properties":          map[string]any{},
+				"strict": true,
+			},
+		},
+		{
+			"type":        "function",
+			"name":        "set_mic_gain",
+			"description": "Override the gain multiplier for a specific audio track. Use when a participant is too quiet or too loud. gain=1.0 means AGC-only (no AI override). gain=2.0 doubles their volume. gain=0 removes the override entirely. Maximum useful value is 4.0.",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"track_key": map[string]any{"type": "string", "description": "Track key as returned by get_mic_gains"},
+					"gain":      map[string]any{"type": "number", "description": "Gain multiplier. 0 removes override. 1.0 = AGC only. 2.0 = double volume. Max 4.0."},
+				},
+				"required":             []string{"track_key", "gain"},
+				"strict": true,
 			},
 		},
 		{
@@ -589,7 +686,7 @@ func (app *kanbanBoardApp) kanbanTools() []map[string]any {
 					"reason": map[string]any{"type": "string"},
 				},
 				"required":             []string{"reason"},
-				"additionalProperties": false,
+				"strict": true,
 			},
 		},
 	}
@@ -608,18 +705,23 @@ func (app *kanbanBoardApp) handleRealtimeEvent(raw []byte) {
 			log.Errorf("OpenAI Realtime error code=%s message=%s", event.Error.Code, event.Error.Message)
 			broadcastKanbanEvent("status", event.Error.Message)
 		}
-	case "response.output_item.done":
-		if event.Item != nil && event.Item.Type == "function_call" {
-			app.handleToolCall(*event.Item)
+	case "conversation.item.input_audio_transcription.completed":
+		if t := strings.TrimSpace(event.Transcript); t != "" {
+			log.Infof("User said: %q", t)
 		}
-	case "response.function_call_arguments.done":
-		app.handleToolCall(kanbanRealtimeOutputItem{
-			Type:      "function_call",
-			Name:      event.Name,
-			Arguments: event.Arguments,
-			CallID:    event.CallID,
-		})
+	case "response.audio_transcript.delta", "response.output_audio_transcript.delta",
+		"response.text.delta", "response.output_text.delta":
+		if event.Delta != "" {
+			broadcastKanbanEvent("ai_transcript_delta", event.Delta)
+		}
+	case "response.audio_transcript.done", "response.output_audio_transcript.done",
+		"response.text.done", "response.output_text.done":
+		broadcastKanbanEvent("ai_transcript_done", nil)
 	case "response.done":
+		// response.done is the sole dispatch point for tool calls — it fires once
+		// per turn and carries all function calls in output[]. Using it exclusively
+		// prevents the 3x firing that happens when response.output_item.done and
+		// response.function_call_arguments.done also dispatch the same call.
 		if event.Response == nil {
 			return
 		}
@@ -629,6 +731,7 @@ func (app *kanbanBoardApp) handleRealtimeEvent(raw []byte) {
 			}
 		}
 	}
+
 }
 
 func (app *kanbanBoardApp) handleToolCall(outputItem kanbanRealtimeOutputItem) {
@@ -644,6 +747,8 @@ func (app *kanbanBoardApp) handleToolCall(outputItem kanbanRealtimeOutputItem) {
 	}
 	app.handledCalls[outputItem.CallID] = struct{}{}
 	app.mu.Unlock()
+
+	log.Infof("Tool call: %s args=%s", outputItem.Name, outputItem.Arguments)
 
 	result, changed, err := app.applyToolCall(outputItem)
 	if err != nil {
@@ -693,6 +798,45 @@ func (app *kanbanBoardApp) applyToolCall(outputItem kanbanRealtimeOutputItem) (m
 		return app.updateTicket(args)
 	case "delete_ticket":
 		return app.deleteTicket(args)
+	case "fetch_url":
+		rawURL := asString(args["url"])
+		if rawURL == "" {
+			return map[string]any{"ok": false, "error": "url is required"}, false, nil
+		}
+		resp, err := http.Get(rawURL) //nolint:gosec
+		if err != nil {
+			return map[string]any{"ok": false, "error": err.Error()}, false, nil
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 32*1024)) // 32KB cap
+		if err != nil {
+			return map[string]any{"ok": false, "error": err.Error()}, false, nil
+		}
+		if resp.StatusCode >= 400 {
+			return map[string]any{"ok": false, "error": fmt.Sprintf("HTTP %d", resp.StatusCode)}, false, nil
+		}
+		return map[string]any{"ok": true, "content": string(body)}, false, nil
+	case "get_mic_gains":
+		gains := roomMixer.gainSnapshot()
+		result := make([]map[string]any, 0, len(gains))
+		for key, info := range gains {
+			result = append(result, map[string]any{
+				"track_key":   key,
+				"agc_gain":    info.AGCGain,
+				"manual_gain": info.ManualGain,
+				"applied":     info.Applied,
+			})
+		}
+		return map[string]any{"ok": true, "tracks": result}, false, nil
+	case "set_mic_gain":
+		trackKey := asString(args["track_key"])
+		gain, _ := args["gain"].(float64)
+		if trackKey == "" {
+			return map[string]any{"ok": false, "error": "track_key is required"}, false, nil
+		}
+		roomMixer.setManualGain(trackKey, gain)
+		log.Infof("AI set mic gain: track=%s gain=%.2f", trackKey, gain)
+		return map[string]any{"ok": true, "track_key": trackKey, "gain": gain}, false, nil
 	case "do_nothing":
 		reason := asString(args["reason"])
 		if reason == "" {
@@ -849,6 +993,7 @@ func (app *kanbanBoardApp) deleteTicket(args map[string]any) (map[string]any, bo
 	if index == -1 {
 		return nil, false, fmt.Errorf("unknown card_id: %s", cardID)
 	}
+	deleted := cloneKanbanCard(app.cards[index])
 	app.cards = append(app.cards[:index], app.cards[index+1:]...)
 	app.touchLocked()
 
@@ -856,6 +1001,12 @@ func (app *kanbanBoardApp) deleteTicket(args map[string]any) (map[string]any, bo
 		"ok":      true,
 		"deleted": true,
 		"card_id": cardID,
+		"deleted_card": map[string]any{
+			"title":  deleted.Title,
+			"notes":  deleted.Notes,
+			"tags":   deleted.Tags,
+			"status": deleted.Status,
+		},
 	}, true, nil
 }
 
@@ -1022,4 +1173,39 @@ func broadcastKanbanEvent(event string, data any) {
 			log.Errorf("Failed to send Kanban event: %v", err)
 		}
 	}
+}
+
+// IsConnected reports whether the OpenAI Realtime session is active.
+func (app *kanbanBoardApp) IsConnected() bool {
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	return app.connected
+}
+
+func (app *kanbanBoardApp) IsVoiceMode() bool {
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	return app.voiceMode
+}
+
+// Disconnect closes the OpenAI Realtime peer connection and resets session state
+// so JoinConferenceRoom can be called again.
+func (app *kanbanBoardApp) Disconnect() error {
+	app.mu.Lock()
+	pc := app.pc
+	app.pc = nil
+	app.events = nil
+	app.inputTrack = nil
+	app.inputEnc = nil
+	app.connected = false
+	app.closeOnce = sync.Once{} // reset so Close() works on a future instance
+	app.mu.Unlock()
+
+	if roomMixer != nil {
+		roomMixer.removeSink(realtimeMixedAudioSinkKey)
+	}
+	if pc != nil {
+		return pc.Close()
+	}
+	return nil
 }

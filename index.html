@@ -3,7 +3,14 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Realtime Kanban Meeting Assistant</title>
+    <title>Meeting Assistant</title>
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Meeting">
+    <meta name="mobile-web-app-capable" content="yes">
+    <link rel="manifest" href="/meeting/manifest.json">
+    <link rel="icon" type="image/svg+xml" href="/meeting/icon.svg">
+    <link rel="apple-touch-icon" href="/meeting/icon.svg">
     <style>
       :root {
         color-scheme: dark;
@@ -16,17 +23,26 @@
         box-sizing: border-box;
       }
 
-      body {
+      :root {
+        --bar-height: 62px;
+        --bar-height-mobile: 62px;
+      }
+
+      html, body {
         margin: 0;
+        overflow-x: hidden;
+      }
+
+      body {
         min-height: 100vh;
       }
 
       main {
         display: grid;
-        grid-template-rows: auto minmax(0, 1fr) auto;
+        grid-template-rows: auto minmax(0, 1fr);
         gap: 12px;
         min-height: 100vh;
-        padding: 12px;
+        padding: 12px 12px calc(var(--bar-height) + 12px);
       }
 
       .topbar,
@@ -42,6 +58,29 @@
         background: #3c4043;
         min-height: 36px;
         padding: 6px 12px;
+        flex-wrap: nowrap;
+      }
+
+      .topbar > div:not(.ai-controls) {
+        flex: 1 1 60px;
+        min-width: 60px;
+        overflow: hidden;
+      }
+
+      .topbar h1,
+      .topbar .status {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        max-width: 100%;
+      }
+
+      .ai-controls {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-left: auto;
+        flex-shrink: 0;
       }
 
       .presenting-pill {
@@ -118,6 +157,8 @@
       .presentation-tile {
         display: grid;
         padding: 14px;
+        min-width: 0;
+        overflow: hidden;
       }
 
       .video-rail {
@@ -181,7 +222,6 @@
         grid-template-columns: repeat(4, minmax(170px, 1fr));
         gap: 12px;
         align-items: start;
-        min-width: 736px;
       }
 
       .column,
@@ -298,11 +338,13 @@
       .toast-region {
         position: fixed;
         right: 18px;
-        bottom: 18px;
+        bottom: calc(var(--bar-height) + 10px);
         z-index: 1100;
         display: grid;
         gap: 10px;
         width: min(360px, calc(100vw - 36px));
+        max-height: 40vh;
+        overflow: hidden;
         pointer-events: none;
       }
 
@@ -316,6 +358,19 @@
         font-weight: 700;
         line-height: 1.35;
         padding: 12px 14px;
+        animation: toast-in 180ms ease-out;
+      }
+
+      .ai-reply-toast {
+        border: 1px solid rgba(52, 168, 83, 0.5);
+        border-radius: 14px;
+        background: #1a3320;
+        box-shadow: 0 8px 32px rgba(52, 168, 83, 0.2), 0 16px 40px rgba(0, 0, 0, 0.4);
+        color: #c8f0c8;
+        font-size: 16px;
+        font-weight: 700;
+        line-height: 1.4;
+        padding: 16px 18px;
         animation: toast-in 180ms ease-out;
       }
 
@@ -502,12 +557,111 @@
         padding: 0 2px;
       }
 
+      .ai-session-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        border: 0;
+        border-radius: 999px;
+        background: #3c4043;
+        color: inherit;
+        cursor: pointer;
+        font: inherit;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        padding: 5px 11px 5px 8px;
+        transition: background 120ms, opacity 120ms;
+        white-space: nowrap;
+      }
+
+      .ai-session-btn:hover {
+        background: #4a4e51;
+      }
+
+      .ai-session-btn:active {
+        opacity: 0.8;
+      }
+
+      .voice-toggle-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 32px;
+        height: 32px;
+        border: 0;
+        border-radius: 999px;
+        background: #3c4043;
+        color: #9aa0a6;
+        cursor: pointer;
+        flex-shrink: 0;
+        transition: background 120ms, color 120ms;
+      }
+
+      .voice-toggle-btn:hover { background: #4a4e51; }
+
+      .voice-toggle-btn .icon-on  { display: none; }
+      .voice-toggle-btn .icon-off { display: block; }
+
+      .voice-toggle-btn.active {
+        background: #1e3320;
+        color: #34a853;
+      }
+
+      .voice-toggle-btn.active .icon-on  { display: block; }
+      .voice-toggle-btn.active .icon-off { display: none; }
+
+      .ai-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+
+      .ai-dot.connected {
+        background: #34a853;
+      }
+
+      .ai-dot.listening {
+        background: #34a853;
+        box-shadow: 0 0 0 0 rgba(52, 168, 83, 0.6);
+        animation: ai-pulse-green 2s ease-out infinite;
+      }
+
+      .ai-dot.disconnected {
+        background: #f9ab00;
+      }
+
+      @keyframes ai-pulse-green {
+        0%   { box-shadow: 0 0 0 0 rgba(52, 168, 83, 0.55); }
+        60%  { box-shadow: 0 0 0 5px rgba(52, 168, 83, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(52, 168, 83, 0); }
+      }
+
+      .ai-dot.pending {
+        background: #9aa0a6;
+        animation: ai-pending 0.8s ease-in-out infinite alternate;
+      }
+
+      @keyframes ai-pending {
+        from { opacity: 0.4; }
+        to   { opacity: 1; }
+      }
+
+
       .meeting-bar {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        display: flex;
+        justify-content: center;
         align-items: center;
         gap: 12px;
-        min-height: 52px;
+        padding: 10px 12px;
+        background: #202124;
+        border-top: 1px solid rgba(255,255,255,0.08);
+        z-index: 500;
       }
 
       .controls {
@@ -612,22 +766,20 @@
 
         .board {
           grid-template-columns: repeat(4, minmax(160px, 1fr));
-          min-width: 688px;
         }
       }
 
       @media (max-width: 860px) {
         main {
-          padding: 12px;
-        }
-
-        .topbar {
-          align-items: flex-start;
-          flex-direction: column;
+          padding: 12px 12px calc(var(--bar-height-mobile) + 12px);
         }
 
         .workspace {
           grid-template-columns: 1fr;
+        }
+
+        .board {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
         }
 
         .video-rail {
@@ -639,14 +791,13 @@
           grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
         }
 
-        .meeting-bar {
-          grid-template-columns: 1fr;
-          justify-items: stretch;
+        .toast-region {
+          right: 12px;
+          left: 12px;
+          width: auto;
+          bottom: calc(var(--bar-height-mobile) + 10px);
         }
 
-        .controls {
-          order: -1;
-        }
       }
 
       @media (max-width: 640px) {
@@ -665,6 +816,32 @@
           <h1>Realtime Kanban Meeting Assistant</h1>
           <p class="status" id="status">Not connected</p>
         </div>
+        <div class="ai-controls">
+          <button class="ai-session-btn" id="aiSessionBtn" type="button" aria-label="AI session status">
+            <span class="ai-dot {{if .AIConnected}}connected{{else}}disconnected{{end}}" id="aiDot"></span>
+            <span id="aiSessionLabel">{{if .AIConnected}}AI ready{{else}}AI disconnected{{end}}</span>
+          </button>
+          <button class="voice-toggle-btn {{if .VoiceMode}}active{{end}}" id="voiceToggleBtn" type="button"
+                  title="{{if .VoiceMode}}AI speaking — click to mute{{else}}AI muted — click to unmute{{end}}"
+                  aria-pressed="{{if .VoiceMode}}true{{else}}false{{end}}">
+            <!-- icon-on: robot speaking (voice active) -->
+            <svg class="icon-on" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="8" width="12" height="11" rx="2"/>
+              <path d="M7 8V6a2 2 0 0 1 4 0v2"/>
+              <circle cx="8" cy="13" r="1" fill="currentColor" stroke="none"/>
+              <circle cx="12" cy="13" r="1" fill="currentColor" stroke="none"/>
+              <path d="M18 9a3 3 0 0 1 0 6"/><path d="M21 7a6 6 0 0 1 0 10"/>
+            </svg>
+            <!-- icon-off: robot muted (voice inactive) -->
+            <svg class="icon-off" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="8" width="12" height="11" rx="2"/>
+              <path d="M7 8V6a2 2 0 0 1 4 0v2"/>
+              <circle cx="8" cy="13" r="1" fill="currentColor" stroke="none"/>
+              <circle cx="12" cy="13" r="1" fill="currentColor" stroke="none"/>
+              <line x1="19" y1="8" x2="23" y2="16"/><line x1="23" y1="8" x2="19" y2="16"/>
+            </svg>
+          </button>
+        </div>
       </header>
 
       <div class="workspace">
@@ -677,7 +854,7 @@
 
         <aside class="video-rail" aria-label="Conference videos">
           <div id="videoStack" class="video-stack">
-            <div class="video-tile">
+            <div class="video-tile" id="localVideoTile" style="display:none">
               <video id="localVideo" autoplay muted playsinline></video>
               <span class="video-label">You</span>
             </div>
@@ -686,12 +863,10 @@
       </div>
 
       <footer class="meeting-bar">
-        <p id="log" class="log" aria-live="polite">Team meeting</p>
         <div class="controls">
           <button id="join" class="primary" type="button">Join room</button>
           <button id="leave" type="button" disabled>Leave</button>
         </div>
-        <span aria-hidden="true"></span>
       </footer>
     </main>
     <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
@@ -702,7 +877,7 @@
       const statuses = ['Backlog', 'In Progress', 'Blocked', 'Done']
       const boardEl = document.getElementById('board')
       const statusEl = document.getElementById('status')
-      const logEl = document.getElementById('log')
+
       const joinButton = document.getElementById('join')
       const leaveButton = document.getElementById('leave')
       const localVideo = document.getElementById('localVideo')
@@ -743,8 +918,9 @@
         try {
           localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
           localVideo.srcObject = localStream
+          document.getElementById('localVideoTile').style.display = ''
 
-          pc = new RTCPeerConnection()
+          pc = new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'},{urls:'stun:stun1.l.google.com:19302'}]})
           pc.ontrack = addRemoteTrack
           pc.onicecandidate = event => {
             if (!event.candidate || ws?.readyState !== WebSocket.OPEN) {
@@ -776,19 +952,31 @@
         }
       }
 
+      let pendingCandidates = []
+      let remoteDescSet = false
+
       async function handleSignal(message) {
         switch (message.event) {
           case 'offer': {
+            remoteDescSet = false
+            pendingCandidates = []
             const offer = JSON.parse(message.data)
             await pc.setRemoteDescription(offer)
+            remoteDescSet = true
             const answer = await pc.createAnswer()
             await pc.setLocalDescription(answer)
             ws.send(JSON.stringify({ event: 'answer', data: JSON.stringify(answer) }))
+            for (const c of pendingCandidates) await pc.addIceCandidate(c)
+            pendingCandidates = []
             break
           }
           case 'candidate': {
             const candidate = JSON.parse(message.data)
-            await pc.addIceCandidate(candidate)
+            if (remoteDescSet) {
+              await pc.addIceCandidate(candidate)
+            } else {
+              pendingCandidates.push(candidate)
+            }
             break
           }
           case 'kanban':
@@ -809,13 +997,60 @@
             }
             break
           case 'status':
-            setLog(String(message.data || ''))
+            // server status strings intentionally not displayed
+            break
+          case 'ai_status':
+            setAiState(!!message.data?.connected)
+            break
+          case 'ai_transcript_delta':
+            appendAiTranscriptDelta(String(message.data || ''))
+            break
+          case 'ai_transcript_done':
+            finalizeAiTranscript()
+            break
+          case 'voice_mode':
+            setVoiceMode(!!message.data?.enabled)
             break
         }
       }
 
+      let _aiTranscriptEl = null
+      let _aiTranscriptTimer = null
+
+      function appendAiTranscriptDelta(delta) {
+        if (!delta) return
+        if (!_aiTranscriptEl) {
+          if (_aiTranscriptTimer) { clearTimeout(_aiTranscriptTimer); _aiTranscriptTimer = null }
+          toastRegion.querySelectorAll('.ai-reply-toast').forEach(el => el.remove())
+          _aiTranscriptEl = document.createElement('div')
+          _aiTranscriptEl.className = 'ai-reply-toast'
+          _aiTranscriptEl.textContent = '🤖 '
+          toastRegion.appendChild(_aiTranscriptEl)
+        }
+        _aiTranscriptEl.textContent += delta
+      }
+
+      function finalizeAiTranscript() {
+        if (!_aiTranscriptEl) return
+        const el = _aiTranscriptEl
+        _aiTranscriptEl = null
+        _aiTranscriptTimer = window.setTimeout(() => { el.remove(); _aiTranscriptTimer = null }, 5000)
+      }
+
+      // Hidden audio element for AI voice output
+      const aiAudioEl = document.createElement('audio')
+      aiAudioEl.autoplay = true
+      document.body.appendChild(aiAudioEl)
+
       function addRemoteTrack(event) {
         if (event.track.kind === 'audio') {
+          // Route audio-only tracks (AI voice) to the hidden audio element.
+          // participant audio comes via the WebRTC peer, not this path —
+          // room mixing happens server-side. Only the AI's voice arrives here.
+          if (event.streams[0]) {
+            aiAudioEl.srcObject = event.streams[0]
+            aiAudioEl.play().catch(() => {})
+          }
           return
         }
 
@@ -1324,6 +1559,7 @@
           ws.close()
         }
         ws = undefined
+        setAiState(aiConnected) // refresh label: inRoom is now false
 
         if (pc) {
           pc.close()
@@ -1335,9 +1571,12 @@
         }
         localStream = undefined
         localVideo.srcObject = null
+        document.getElementById('localVideoTile').style.display = 'none'
 
         remoteElements.forEach(tile => tile.remove())
         remoteElements.clear()
+        pendingCandidates = []
+        remoteDescSet = false
         setStatus('Not connected')
       }
 
@@ -1346,8 +1585,74 @@
       }
 
       function setLog(message) {
-        logEl.textContent = message
+        if (message) showToast(message)
       }
+
+      // ── AI session status button ────────────────────────────────────────
+      const aiSessionBtn = document.getElementById('aiSessionBtn')
+      const aiDot = document.getElementById('aiDot')
+      const aiSessionLabel = document.getElementById('aiSessionLabel')
+      let aiConnected = {{.AIConnected}}
+
+      function setAiState(connected) {
+        aiConnected = connected
+        const inRoom = ws?.readyState === WebSocket.OPEN
+        if (connected) {
+          aiDot.className = inRoom ? 'ai-dot listening' : 'ai-dot connected'
+          aiSessionLabel.textContent = inRoom ? 'AI listening' : 'AI ready'
+          aiSessionBtn.title = 'Click to disconnect AI session'
+        } else {
+          aiDot.className = 'ai-dot disconnected'
+          aiSessionLabel.textContent = 'AI disconnected'
+          aiSessionBtn.title = 'Click to reconnect AI session'
+        }
+      }
+
+      aiSessionBtn.addEventListener('click', async () => {
+        aiSessionBtn.disabled = true
+        const wasConnected = aiConnected
+        aiDot.className = 'ai-dot pending'
+        aiSessionLabel.textContent = 'pending'
+        try {
+          const endpoint = wasConnected ? '/api/ai-disconnect' : '/api/ai-connect'
+          const resp = await fetch(endpoint, { method: 'POST' })
+          if (resp.ok) {
+            // HTTP response confirms the server accepted the request.
+            // Update this browser immediately; other browsers in the room
+            // will update via the ai_status WebSocket broadcast.
+            setAiState(!wasConnected)
+          } else {
+            setAiState(wasConnected)
+            setLog('AI session error: ' + await resp.text())
+          }
+        } catch (e) {
+          setAiState(wasConnected)
+          setLog('AI session error: ' + e.message)
+        } finally {
+          aiSessionBtn.disabled = false
+        }
+      })
+
+      // ── AI voice toggle ───────────────────────────────────────────────
+      const voiceToggleBtn = document.getElementById('voiceToggleBtn')
+      let aiVoiceEnabled = {{if .VoiceMode}}true{{else}}false{{end}}
+
+      function setVoiceMode(enabled) {
+        aiVoiceEnabled = enabled
+        voiceToggleBtn.classList.toggle('active', enabled)
+        voiceToggleBtn.title = enabled ? 'AI voice on — click to mute' : 'AI voice off — click to enable'
+        voiceToggleBtn.setAttribute('aria-pressed', String(enabled))
+      }
+
+      voiceToggleBtn.addEventListener('click', () => {
+        // Optimistic update — server broadcast will confirm via voice_mode event
+        setVoiceMode(!aiVoiceEnabled)
+        fetch('/api/set-voice-mode', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: aiVoiceEnabled }),
+        }).catch(() => setVoiceMode(!aiVoiceEnabled)) // revert on failure
+      })
     </script>
   </body>
 </html>
